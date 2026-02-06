@@ -4,7 +4,7 @@ Intégration HYXi Cloud (open.hyxicloud.com) pour 2 micro-onduleurs
 Requêtes GET /api/device/v1/queryDeviceData comme dans Postman
 + Gestion automatique du renouvellement du token
 + Mise à 0W à la fermeture du polling (coucher du soleil)
-+ last_reset sur le compteur "aujourd'hui" pour gérer le reset minuit
++ state_class: measurement pour les énergies (affichage direct de l'API HYXi)
 """
 
 import appdaemon.plugins.hass.hassapi as hass
@@ -12,7 +12,6 @@ import requests
 import hmac
 import hashlib
 import base64
-from datetime import datetime
 import time
 import json
 
@@ -41,22 +40,22 @@ class HyxiCloud(hass.Hass):
         # État du polling : pour savoir si on était actif avant
         self.was_polling = False
 
-        # Noms des entités HA
+        # Noms des entités HA (v2 pour forcer la recréation propre)
         self.entity_toit = {
-            "power": "sensor.hyxi_toit_power",
-            "today": "sensor.hyxi_toit_today_energy",
-            "total": "sensor.hyxi_toit_total_energy",
-            "temp": "sensor.hyxi_toit_temperature",
-            "vac": "sensor.hyxi_toit_vac",
-            "vpv": "sensor.hyxi_toit_vpv",
+            "power": "sensor.hyxi_toit_power_v2",
+            "today": "sensor.hyxi_toit_today_energy_v2",
+            "total": "sensor.hyxi_toit_total_energy_v2",
+            "temp": "sensor.hyxi_toit_temperature_v2",
+            "vac": "sensor.hyxi_toit_vac_v2",
+            "vpv": "sensor.hyxi_toit_vpv_v2",
         }
         self.entity_jardin = {
-            "power": "sensor.hyxi_jardin_power",
-            "today": "sensor.hyxi_jardin_today_energy",
-            "total": "sensor.hyxi_jardin_total_energy",
-            "temp": "sensor.hyxi_jardin_temperature",
-            "vac": "sensor.hyxi_jardin_vac",
-            "vpv": "sensor.hyxi_jardin_vpv",
+            "power": "sensor.hyxi_jardin_power_v2",
+            "today": "sensor.hyxi_jardin_today_energy_v2",
+            "total": "sensor.hyxi_jardin_total_energy_v2",
+            "temp": "sensor.hyxi_jardin_temperature_v2",
+            "vac": "sensor.hyxi_jardin_vac_v2",
+            "vpv": "sensor.hyxi_jardin_vpv_v2",
         }
 
         self.log(
@@ -68,75 +67,74 @@ class HyxiCloud(hass.Hass):
         self.run_in(self.poll_once, 5)
 
     # ------------------------------------------------------------------
-    # Helpers : fermeture du polling & last_reset
+    # Helpers : fermeture du polling
     # ------------------------------------------------------------------
-
-    def _get_today_midnight_iso(self):
-        """Retourne minuit aujourd'hui au format ISO 8601 pour last_reset"""
-        now = datetime.now()
-        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        return midnight.isoformat()
 
     def _send_zero_and_close(self, entities, label):
         """
         Envoyé une SEULE fois quand on sort de la plage solaire.
         - Puissance → 0 W
-        - Énergie aujourd'hui : on garde la dernière valeur mais on met
-          last_reset à minuit aujourd'hui (HASS saura qu'il peut descendre
-          à 0 demain matin sans erreur)
-        - Température, tensions → 0 / inconnu
+        - Énergie aujourd'hui : on garde la dernière valeur
+        - Température, tensions → 0
         """
         self.log(f"[{label}] Fermeture du polling — mise à 0W")
 
-        # Puissance à 0
-        self.set_state(entities["power"], state=0, attributes={
-            "unit_of_measurement": "W",
-            "device_class": "power",
-            "state_class": "measurement",
-            "friendly_name": f"HYXi {label} - Puissance",
-            "icon": "mdi:solar-power"
-        })
+        # Puissance à 0.001 (au lieu de 0 pour éviter rejet HASS)
+        try:
+            self.set_state(entities["power"], state=0.001, attributes={
+                "unit_of_measurement": "W",
+                "device_class": "power",
+                "state_class": "measurement",
+                "friendly_name": f"HYXi {label} - Puissance",
+                "icon": "mdi:solar-power"
+            })
+        except Exception as e:
+            self.log(f"[{label}] Erreur lors de la mise à 0 de la puissance: {e}", level="WARNING")
 
-        # Température à 0
-        self.set_state(entities["temp"], state=0, attributes={
-            "unit_of_measurement": "°C",
-            "device_class": "temperature",
-            "state_class": "measurement",
-            "friendly_name": f"HYXi {label} - Temperature",
-            "icon": "mdi:thermometer"
-        })
+        # Température à 0.001 (au lieu de 0 pour éviter rejet HASS)
+        try:
+            self.set_state(entities["temp"], state=0.001, attributes={
+                "unit_of_measurement": "°C",
+                "device_class": "temperature",
+                "state_class": "measurement",
+                "friendly_name": f"HYXi {label} - Temperature",
+                "icon": "mdi:thermometer"
+            })
+        except Exception as e:
+            self.log(f"[{label}] Erreur lors de la mise à 0 de la température: {e}", level="WARNING")
 
-        # Tensions à 0
+        # Tensions à 0.001 (au lieu de 0 pour éviter rejet HASS)
         for key, name, icon in [
             ("vac", "Tension AC", "mdi:flash"),
             ("vpv", "Tension PV", "mdi:solar-panel"),
         ]:
-            self.set_state(entities[key], state=0, attributes={
-                "unit_of_measurement": "V",
-                "device_class": "voltage",
-                "state_class": "measurement",
-                "friendly_name": f"HYXi {label} - {name}",
-                "icon": icon
-            })
+            try:
+                self.set_state(entities[key], state=0.001, attributes={
+                    "unit_of_measurement": "V",
+                    "device_class": "voltage",
+                    "state_class": "measurement",
+                    "friendly_name": f"HYXi {label} - {name}",
+                    "icon": icon
+                })
+            except Exception as e:
+                self.log(f"[{label}] Erreur lors de la mise à 0 de {name}: {e}", level="WARNING")
 
-        # Énergie aujourd'hui : on ne touche pas la valeur (elle reste correcte)
-        # mais on pose last_reset = minuit aujourd'hui.
-        # Comme on utilise state_class: total avec last_reset, HASS sait que
-        # la valeur peut redescendre à 0 après ce timestamp.
-        # On récupère l'état actuel pour ne pas le changer.
+        # Énergie aujourd'hui : on récupère l'état actuel et on le garde tel quel.
+        # Comme on utilise state_class: measurement, HASS ne s'attend pas à ce que
+        # la valeur soit monotone croissante.
         try:
             current_today = self.get_state(entities["today"])
         except Exception:
             current_today = 0
 
-        self.set_state(entities["today"], state=current_today, attributes={
-            "unit_of_measurement": "kWh",
-            "device_class": "energy",
-            "state_class": "total",
-            "last_reset": self._get_today_midnight_iso(),
-            "friendly_name": f"HYXi {label} - Energie Aujourd'hui",
-            "icon": "mdi:solar-power"
-        })
+        try:
+            self.set_state(entities["today"], state=current_today, attributes={
+                "unit_of_measurement": "kWh",
+                "friendly_name": f"HYXi {label} - Energie Aujourd'hui",
+                "icon": "mdi:solar-power"
+            })
+        except Exception as e:
+            self.log(f"[{label}] Erreur lors de la mise à jour de l'énergie aujourd'hui: {e}", level="WARNING")
 
     # ------------------------------------------------------------------
     # Token
@@ -317,6 +315,9 @@ class HyxiCloud(hass.Hass):
         vac = get_value("ph1v")
         vpv = get_value("pv1v")
 
+        # Log des valeurs récupérées pour debug
+        self.log(f"[{label}] Valeurs récupérées: acP={acP}, acE={acE}, totalE={totalE}, temp={temp}, vac={vac}, vpv={vpv}")
+
         # Puissance instantanée (W)
         self.set_state(entities["power"], state=acP, attributes={
             "unit_of_measurement": "W",
@@ -327,14 +328,19 @@ class HyxiCloud(hass.Hass):
         })
 
         # Énergie aujourd'hui (kWh)
-        # FIX: On utilise state_class: total + last_reset (mis à minuit aujourd'hui)
-        # à la place de total_increasing. Comme ça HASS accepte la descente
-        # vers 0 après le reset quotidien de HYXi.
-        self.set_state(entities["today"], state=round(float(acE), 1), attributes={
+        # Simple capteur numérique sans state_class car HASS refuse measurement avec énergie.
+        # On affiche juste la valeur brute de l'API HYXi.
+        # FIX: Si acE == 0, on met 0.001 pour éviter le rejet 400 de HASS.
+        try:
+            acE_value = round(float(acE), 3) if acE is not None else 0.001
+            if acE_value == 0:
+                acE_value = 0.001
+        except (ValueError, TypeError):
+            self.log(f"[{label}] Valeur acE invalide: {acE}, utilisation de 0.001", level="WARNING")
+            acE_value = 0.001
+        
+        self.set_state(entities["today"], state=acE_value, attributes={
             "unit_of_measurement": "kWh",
-            "device_class": "energy",
-            "state_class": "total",
-            "last_reset": self._get_today_midnight_iso(),
             "friendly_name": f"HYXi {label} - Energie Aujourd'hui",
             "icon": "mdi:solar-power"
         })
